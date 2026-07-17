@@ -1,0 +1,55 @@
+import json
+import boto3
+from boto3.dynamodb.conditions import Key
+
+# Khởi tạo kết nối DynamoDB
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('ProjectsMetadata') # Bảng lưu trữ CV của bạn
+
+def lambda_handler(event, context):
+    try:
+        # Lấy username từ URL (Query String Parameters)
+        query_params = event.get('queryStringParameters') or {}
+        username = query_params.get('username')
+
+        if not username:
+            return {
+                'statusCode': 400,
+                'headers': {
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Headers': 'Content-Type',
+                    'Access-Control-Allow-Methods': 'OPTIONS,GET'
+                },
+                'body': json.dumps({'error': 'Thiếu tham số username'})
+            }
+
+        # Truy vấn DynamoDB lấy tất cả các CV của user này
+        response = table.query(
+            KeyConditionExpression=Key('username').eq(username)
+        )
+        
+        items = response.get('Items', [])
+        
+        # Sắp xếp để dự án mới nhất lên đầu tiên
+        items.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'OPTIONS,GET'
+            },
+            'body': json.dumps({'projects': items})
+        }
+        
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'OPTIONS,GET'
+            },
+            'body': json.dumps({'error': str(e)})
+        }
