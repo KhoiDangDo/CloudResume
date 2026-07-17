@@ -1,0 +1,62 @@
+import json
+import boto3
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('ProjectsMetadata')
+s3 = boto3.client('s3')
+
+# Khai báo cả 2 bucket
+HOSTING_BUCKET = 'cloudresume-public-hosting-khoi'
+UPLOAD_BUCKET = 'cloudresume-pdf-uploads-khoi'
+
+def lambda_handler(event, context):
+    try:
+        # Lấy thông tin từ URL
+        query_params = event.get('queryStringParameters') or {}
+        username = query_params.get('username')
+        project_id = query_params.get('project_id')
+
+        if not username or not project_id:
+            return {
+                'statusCode': 400, 
+                'body': json.dumps({'error': 'Thiếu tham số username hoặc project_id'})
+            }
+
+        # 1. XÓA DỮ LIỆU KHỎI DYNAMODB
+        table.delete_item(
+            Key={
+                'username': username,
+                'project_id': project_id
+            }
+        )
+        
+        # 2. XÓA THÀNH PHẨM WEB TRÊN S3 (Bucket Hosting)
+        try:
+            # Thành phẩm web được lưu ở thư mục 'users/'
+            prefix_hosting = f"users/{username}/{project_id}/"
+            res_hosting = s3.list_objects_v2(Bucket=HOSTING_BUCKET, Prefix=prefix_hosting)
+            
+            if 'Contents' in res_hosting:
+                objects_to_delete = [{'Key': obj['Key']} for obj in res_hosting['Contents']]
+                s3.delete_objects(Bucket=HOSTING_BUCKET, Delete={'Objects': objects_to_delete})
+        except Exception as e:
+            print("Lỗi xóa Hosting S3, bỏ qua:", str(e))
+
+        # 3. XÓA FILE PDF GỐC TRÊN S3 (Bucket Uploads)
+        try:
+            # ĐÃ SỬA LỖI Ở ĐÂY: Quét đúng vào thư mục 'uploads/' chứa PDF
+            prefix_upload = f"uploads/{username}/{project_id}/"
+            res_upload = s3.list_objects_v2(Bucket=UPLOAD_BUCKET, Prefix=prefix_upload)
+            
+            if 'Contents' in res_upload:
+                pdfs_to_delete = [{'Key': obj['Key']} for obj in res_upload['Contents']]
+                s3.delete_objects(Bucket=UPLOAD_BUCKET, Delete={'Objects': pdfs_to_delete})
+        except Exception as e:
+            print("Lỗi xóa Upload S3, bỏ qua:", str(e))
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps({'message': 'Đã xóa vĩnh viễn dự án (DB + Web Hosting + PDF gốc)!'})
+        }
+    except Exception as e:
+        return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
