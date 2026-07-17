@@ -1,0 +1,48 @@
+import json
+import boto3
+import uuid
+
+# Tên bucket bảo mật bạn vừa tạo ở Bước 1
+UPLOAD_BUCKET = 'cloudresume-pdf-uploads-khoi'
+s3_client = boto3.client('s3')
+
+def lambda_handler(event, context):
+    try:
+        # Nhận username từ Frontend truyền lên
+        username = event.get('queryStringParameters', {}).get('username', 'guest')
+        
+        # Tạo ngẫu nhiên một mã dự án (VD: prj_a1b2c3d4)
+        project_id = f"prj_{str(uuid.uuid4())[:8]}"
+        
+        # Đường dẫn lưu file trên S3 (VD: khoi/prj_a1b2c3d4/cv.pdf)
+        file_key = f"uploads/{username}/{project_id}/cv.pdf"
+        
+        # Tạo Presigned URL cho phép lệnh PUT (Upload file), hết hạn sau 300 giây (5 phút)
+        presigned_url = s3_client.generate_presigned_url(
+            'put_object',
+            Params={
+                'Bucket': UPLOAD_BUCKET,
+                'Key': file_key,
+                'ContentType': 'application/pdf'
+            },
+            ExpiresIn=300
+        )
+        
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Content-Type': 'application/json'
+            },
+            'body': json.dumps({
+                'upload_url': presigned_url,
+                'file_key': file_key,
+                'project_id': project_id
+            })
+        }
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'headers': {'Access-Control-Allow-Origin': '*'},
+            'body': json.dumps({'error': str(e)})
+        }
