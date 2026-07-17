@@ -1,0 +1,218 @@
+import json
+import boto3
+import urllib.request
+import urllib.error
+import os
+import io
+import base64
+import re
+import hashlib
+from pypdf import PdfReader
+from PIL import Image
+from datetime import datetime
+
+# Khởi tạo các AWS Client
+s3 = boto3.client('s3')
+secrets_client = boto3.client('secretsmanager')
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('ProjectsMetadata')
+ 
+UPLOAD_BUCKET = 'cloudresume-pdf-uploads-khoi'
+HOSTING_BUCKET = 'cloudresume-public-hosting-khoi'
+SECRET_NAME = 'CloudResume/ClaudeAPIKey'
+CLOUDFRONT_DOMAIN = "d1z3cc3tvyybgw.cloudfront.net"
+ 
+def get_claude_api_key():
+    try:
+        response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
+        secret_dict = json.loads(response['SecretString'])
+        return secret_dict['claude_api_key'].strip().strip("'").strip('"')
+    except Exception as e:
+        print(f"Error retrieving Secret: {str(e)}")
+        raise e
+ 
+def lambda_handler(event, context):
+    try:
+        body = json.loads(event.get('body', '{}'))
+        username = body.get('username')
+        project_id = body.get('project_id')
+        file_key = body.get('file_key')
+        user_prompt = body.get('prompt')
+        
+        # --- BỔ SUNG LẤY TÊN DỰ ÁN TỪ FRONTEND ---
+        # Nếu không có tên, hệ thống sẽ tự tạo tên mặc định dựa vào project_id
+        project_name = body.get('project_name', f"CV Project - {project_id[:5].upper() if project_id else 'UNKNOWN'}")
+        
+        # 1. ĐỌC PDF VÀ TRÍCH XUẤT ẢNH
+        response = s3.get_object(Bucket=UPLOAD_BUCKET, Key=file_key)
+        pdf_bytes = response['Body'].read()
+        
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        pdf_text = ""
+        extracted_images_info = []
+        img_counter = 0
+        uploaded_img_hashes = set()
+ 
+        for page in reader.pages:
+            pdf_text += page.extract_text() + "\n"
+            if hasattr(page, 'images'):
+                for image_file in page.images:
+                    try:
+                        img_raw = Image.open(io.BytesIO(image_file.data))
+                        
+                        if img_raw.size[0] < 50 or img_raw.size[1] < 50:
+                            continue
+                            
+                        if img_raw.mode in ("RGBA", "P", "CMYK"):
+                            img_raw = img_raw.convert("RGB")
+                            
+                        img_buffer = io.BytesIO()
+                        img_raw.save(img_buffer, format="JPEG", quality=85)
+                        img_bytes_clean = img_buffer.getvalue()
+                        
+                        img_hash = hashlib.md5(img_bytes_clean).hexdigest()
+                        if img_hash in uploaded_img_hashes:
+                            continue 
+                        uploaded_img_hashes.add(img_hash)
+                        
+                        img_counter += 1
+                        img_key = f"users/{username}/{project_id}/img_{img_counter}.jpg"
+                        s3.put_object(
+                            Bucket=HOSTING_BUCKET, Key=img_key,
+                            Body=img_bytes_clean, ContentType="image/jpeg"
+                        )
+                        img_public_url = f"https://{CLOUDFRONT_DOMAIN}/{img_key}"
+                        
+                        b64_data = base64.b64encode(img_bytes_clean).decode('utf-8')
+                        extracted_images_info.append((b64_data, "image/jpeg", img_public_url))
+                    except Exception:
+                        continue
+        
+        # 2. FETCH MÃ NGUỒN FRONTEND
+        github_url = "https://raw.githubusercontent.com/ravikiranvm/CloudResume/main/frontend/index.html"
+        req_github = urllib.request.Request(github_url)
+        with urllib.request.urlopen(req_github) as response:
+            base_html = response.read().decode('utf-8')
+            
+        claude_api_key = get_claude_api_key()
+ 
+        # 3. SYSTEM PROMPT (ÉP XÁC DOM & DANH SÁCH PHẲNG)
+        system_instruction = (
+            "You are a Universal UI/UX Architect. Balance these immutable laws:\n"
+            "1. ABSOLUTE DATA INTEGRITY & ZERO HALLUCINATION: Extract and render 100% of the factual text. Zero truncation. Strictly forbidden from inventing new sections.\n"
+            "2. TOKEN-COMPRESSED CREATIVITY (TAILWIND @APPLY): Use a `<style type=\"text/tailwindcss\">` block in the `<head>`. Use Tailwind's `@apply` to globally style semantic tags.\n"
+            "3. EXTREME DOM COMPRESSION (CRITICAL FOR DENSE ACADEMIC CVS): To survive the 8192 token limit on massive documents, you MUST minimize HTML. Output the entire `<body>` without ANY indentation or newlines between tags. For dense, repetitive data (e.g., Publications, References), DO NOT wrap each item in complex nested UI cards; use ultra-flat `<ul class=\"...\"><li>` semantic structures to conserve tokens."
+        )
+ 
+        # 4. USER PROMPT
+        text_prompt = f"""
+[BASE FRONTEND TEMPLATE (FOR REFERENCE)]:
+{base_html}
+
+[SOURCE DOCUMENT TEXT DATA (MUST BE PRESERVED 100%)]:
+{pdf_text}
+ 
+[USER VISUAL LAYOUT REQUIREMENT]:
+"{user_prompt}"
+ 
+[STRICT COMPILATION DIRECTIVES]:
+1. VISUAL TRANSLATION (TAILWIND @APPLY DYNAMIC LAYOUT):
+- Include `<script src="https://cdn.tailwindcss.com"></script>`.
+- Define a `<style type="text/tailwindcss">` block. 
+- Translate the [USER VISUAL LAYOUT REQUIREMENT] into UI patterns via `@apply` targeted at native HTML tags.
+
+2. MECHANICAL COMPLETENESS & EXTREME MINIFICATION:
+- Linearly render 100% of the text data. Do not stop until the absolute final word is printed.
+- DO NOT invent new sections.
+- CRITICAL TOKEN SAVING: Write the HTML inside `<body>` as a continuous string. Do not press 'Enter' or 'Tab' between HTML tags. 
+- CRITICAL TOKEN SAVING: For dense sections (Publications, References), use simple flat lists (`<ul>`, `<ol>`). Let the global CSS handle the spacing and borders.
+
+3. STRICT ASSET DEDUPLICATION & CONTEXTUAL INTEGRATION:
+"""
+        if not extracted_images_info:
+            text_prompt += "- (No external graphic assets extracted from this source document)\n"
+        else:
+            for idx, item in enumerate(extracted_images_info):
+                text_prompt += f"- Asset {idx + 1} URL: {item[2]}\n"
+ 
+        text_prompt += """
+- VISUAL EVALUATION: If multiple URLs display the exact same image, DEDUPLICATE THEM. Render ONLY ONE `<img>` tag for that specific visual content.
+- CONTEXTUAL PLACEMENT: Place retained images ONLY in logically appropriate areas. NEVER create hallucinated "Galleries". Apply `object-fit: cover;`.
+
+4. SINGLE-FILE COMPILATION: Output ONLY the complete HTML file starting with <!DOCTYPE html>.
+"""
+ 
+        content_array = []
+        for item in extracted_images_info:
+            content_array.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": item[1], "data": item[0]}
+            })
+        content_array.append({"type": "text", "text": text_prompt})
+ 
+        raw_url = "https://api.anthropic.com/v1/messages"
+        claude_url = raw_url.encode('ascii', 'ignore').decode('ascii').strip()
+        
+        payload = {
+            "model": "claude-sonnet-4-6", 
+            "max_tokens": 9000, 
+            "temperature": 0.2, 
+            "system": system_instruction,
+            "messages": [{"role": "user", "content": content_array}]
+        }
+        
+        req_headers = {
+            "x-api-key": claude_api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        }
+ 
+        req_claude = urllib.request.Request(claude_url, data=json.dumps(payload).encode('utf-8'), headers=req_headers)
+        with urllib.request.urlopen(req_claude) as api_response:
+            result = json.loads(api_response.read().decode('utf-8'))
+            ai_generated_html = result['content'][0]['text']
+ 
+        # ==========================================
+        # BƯỚC 7: CẮT CHUỖI VÀ TỰ ĐỘNG VÁ LỖI TRUNCATION MẠNH MẼ
+        # ==========================================
+        start_idx = ai_generated_html.find("<!DOCTYPE")
+        if start_idx == -1:
+            start_idx = ai_generated_html.find("<html")
+            
+        end_idx = ai_generated_html.rfind("</html>")
+        
+        if start_idx != -1 and end_idx != -1:
+            ai_generated_html = ai_generated_html[start_idx:end_idx + 7]
+        else:
+            # SAFETY NET: Tự động vá thẻ đóng nếu quá tải token
+            if start_idx != -1:
+                ai_generated_html = ai_generated_html[start_idx:] + "\n</body>\n</html>"
+            elif "```html" in ai_generated_html:
+                ai_generated_html = ai_generated_html.split("```html")[1].split("```")[0].strip()
+            elif "```" in ai_generated_html:
+                ai_generated_html = ai_generated_html.split("```")[1].strip()
+ 
+        hosting_key = f"users/{username}/{project_id}/index.html"
+        s3.put_object(Bucket=HOSTING_BUCKET, Key=hosting_key, Body=ai_generated_html.encode('utf-8'), ContentType='text/html')
+ 
+        public_url = f"https://{CLOUDFRONT_DOMAIN}/{hosting_key}"
+        
+        # --- BỔ SUNG LƯU PROJECT_NAME VÀO DYNAMODB ---
+        table.put_item(Item={
+            'username': username, 
+            'project_id': project_id,
+            'project_name': project_name, # ĐÃ THÊM DÒNG NÀY ĐỂ LƯU TÊN DỰ ÁN
+            'public_url': public_url, 
+            'created_at': datetime.now().isoformat(), 
+            'contact_email': f"{username}@example.com"
+        })
+ 
+        return {
+            'statusCode': 200, 
+            'body': json.dumps({
+                'message': 'Universal Tailwind @apply engine executed successfully!', 
+                'public_url': public_url
+            })
+        }
+    except Exception as e:
+        return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
