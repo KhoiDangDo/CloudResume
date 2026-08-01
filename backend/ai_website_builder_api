@@ -101,7 +101,7 @@ def lambda_handler(event, context):
             "You are a Universal UI/UX Architect. Balance these immutable laws:\n"
             "1. ABSOLUTE DATA INTEGRITY & ZERO HALLUCINATION: Extract and render 100% of the factual text. Zero truncation. Strictly forbidden from inventing new sections.\n"
             "2. TOKEN-COMPRESSED CREATIVITY (TAILWIND @APPLY): Use a `<style type=\"text/tailwindcss\">` block in the `<head>`. Use Tailwind's `@apply` to globally style semantic tags.\n"
-            "3. EXTREME DOM COMPRESSION (CRITICAL FOR DENSE ACADEMIC CVS): To survive the 8192 token limit on massive documents, you MUST minimize HTML. Output the entire `<body>` without ANY indentation or newlines between tags. For dense, repetitive data (e.g., Publications, References), DO NOT wrap each item in complex nested UI cards; use ultra-flat `<ul class=\"...\"><li>` semantic structures to conserve tokens."
+            "3. EXTREME DOM COMPRESSION (CRITICAL FOR DENSE ACADEMIC CVS): To survive the 9000 token limit on massive documents, you MUST minimize HTML. Output the entire `<body>` without ANY indentation or newlines between tags. For dense, repetitive data (e.g., Publications, References), DO NOT wrap each item in complex nested UI cards; use ultra-flat `<ul class=\"...\"><li>` semantic structures to conserve tokens."
         )
  
         # 4. USER PROMPT
